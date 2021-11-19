@@ -5,7 +5,10 @@ if (!require("pacman")) {
 }
 
 pacman::p_load(rvest, aws.translate, aws.comprehend,
-               xml2)
+               tm, dplyr, logger, RedditExtractoR, ggplot2, stringr, wordcloud)
+
+
+# AWS Credentials ---------------------------------------------------------
 
 keyfile = list.files(path=".", pattern="accessKeys.csv", full.names=TRUE)
 if (identical(keyfile, character(0))){
@@ -21,11 +24,92 @@ Sys.setenv("AWS_ACCESS_KEY_ID" = AWS_ACCESS_KEY_ID,
            "AWS_SECRET_ACCESS_KEY" = AWS_SECRET_ACCESS_KEY,
            "AWS_DEFAULT_REGION" = "eu-west-1") 
 
-#install.packages("rvest")
-#install.packages("aws.translate", repos = c(getOption("repos"), "http://cloudyr.github.io/drat"))
-#install.packages("aws.comprehend", repos = c(cloudyr = "http://cloudyr.github.io/drat", getOption("repos")))
 
-# Specifying the URL 
+# Ingest from Reddit API ------------------------------------------------
+
+hungary1 <- find_thread_urls(subreddit="hungary", sort_by="top", period = "month") #monthly top entries
+
+hungary2 <- hungary[!(is.na(hungary$text) | hungary$text==""), ] #drop rows with no body
+hungary3 <- hungary %>% dplyr::filter(nchar(text) < 2000 & nchar(text) > 500) #filter post for limitations
+hungary4 <- hungary[!grepl("http", hungary$text),] #remove posts with only url shares
+hungary4$text <- paste(hungary4$title, hungary4$text)
+
+
+# Process raw data --------------------------------------------------------
+
+iterpost <- function(sub){
+  start.time <- Sys.time()
+  
+  text <- sub[['text']]
+  
+  for (i in 1:length(text)){
+    post = text[i]
+    
+    sub[i, 'nchar'] <- nchar(post)
+    
+    log_info('Translating the post...')
+    sub[i, 'text_en'] <- translate(post, from = "auto", to = "en") #Translating
+    
+    log_info('Preprocessing the post...')
+    post <- sub[i, 'text_en'] %>%
+      removeNumbers() %>%
+      removePunctuation() %>%
+      stripWhitespace() %>% 
+      tolower() %>% 
+      removeWords(c(stopwords(kind = "en"), 'im', 'dont')) %>% 
+      str_squish()
+    
+    sub[i, 'text_processed'] <- post
+    
+    log_info('Detect sentiments...')
+    sub[i, 'sentiment'] <- detect_sentiment(as.character(post))['Sentiment'] #Detect sentiment
+    
+    log_info('Detect keyphrases...')
+    keyphrases <- detect_phrases(post)
+    sub[i, 'keyphrase'] <- keyphrases[order(keyphrases$Score, decreasing = TRUE),]['Text'][1,] #Detect keywords
+    
+    log_info('Post No. {i} processed!')
+    
+  }
+  return(sub)
+  
+  end.time <- Sys.time()
+  time.taken <- end.time - start.time
+  print(time.taken)
+}
+
+hungary_processed <- iterpost(hungary4)
+
+# Post cleanup ------------------------------------------------------------
+
+# remove clutter
+hungary_view <- hungary_processed[, !names(hungary_processed) %in% c('title','subreddit','url')]
+
+# clear rowid
+rownames(hungary_view) <- 1:nrow(hungary_view)
+hungary_view$id <- 1:nrow(hungary_view)
+
+word_corpus <- unnest_tokens(hungary_view, input = text_processed, output = word) %>% 
+  count(id, word, name = "frequency", sort=TRUE)
+
+# VIZ ---------------------------------------------------------------------
+
+# distribution of character numbers
+f1 <- ggplot(data = hungary_view) +
+            geom_histogram(aes(nchar))
+
+# word cloud
+set.seed(1234) # for reproducibility 
+wordcloud(words = word_corpus$word,
+          freq = word_corpus$frequency,
+          min.freq = 1,
+          max.words=15,
+          random.order=FALSE,
+          rot.per=0.35,
+          colors=brewer.pal(8, "Dark2"))
+
+#
+# Specifyig the URL 
 url1 <- 'https://www.origo.hu/itthon/20210916-kiakadtak-a-szulok-az-lmbtqpropaganda-maitt.html'
 url2 <- 'https://444.hu/2021/09/15/a-time-a-meseorszag-mindenkie-cimu-mesekonyvert-a-vilag-100-legbefolyasosabb-embere-koze-sorolta-redai-dorottyat'
 

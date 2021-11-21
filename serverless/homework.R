@@ -1,12 +1,24 @@
+###########################################
+#                                         #
+#        Reddit Sentiments with           #
+#        AWS AI Services and R            #
+#        Author: Son N. Nguyen            #
+#           Date: 11/20/2021              #
+#                                         #
+###########################################
+
+
+# Setup -------------------------------------------------------------------
 
 # Loading packages with pacman
 if (!require("pacman")) {
   install.packages("pacman")
 }
 
-pacman::p_load(rvest, aws.translate, aws.comprehend,
-               tm, dplyr, logger, RedditExtractoR, ggplot2, stringr, wordcloud)
-
+pacman::p_load(aws.translate, aws.comprehend,
+               tm, tidytext, SnowballC, 
+               tidyverse, logger, RedditExtractoR,
+               stringr, wordcloud, data.table)
 
 # AWS Credentials ---------------------------------------------------------
 
@@ -29,17 +41,28 @@ Sys.setenv("AWS_ACCESS_KEY_ID" = AWS_ACCESS_KEY_ID,
 
 hungary1 <- find_thread_urls(subreddit="hungary", sort_by="top", period = "month") #monthly top entries
 
-hungary2 <- hungary[!(is.na(hungary$text) | hungary$text==""), ] #drop rows with no body
-hungary3 <- hungary %>% dplyr::filter(nchar(text) < 2000 & nchar(text) > 500) #filter post for limitations
-hungary4 <- hungary[!grepl("http", hungary$text),] #remove posts with only url shares
-hungary4$text <- paste(hungary4$title, hungary4$text)
+#drop rows with no body
+hungary2 <- hungary1[!(is.na(hungary1$text) | hungary1$text==""), ]
+#glue title and text
+hungary2$text <- paste(hungary2$title, hungary2$text)
+#remove clutter
+hungary3 <- hungary2[, !names(hungary2) %in% c('title','subreddit','url')]
+#filter post for limitations
+hungary4 <- hungary3 %>% dplyr::filter(nchar(text) < 2000 & nchar(text) > 200) 
+#remove posts with only url shares
+hungary5 <- hungary4[!grepl("http", hungary4$text),] 
 
+# assign rowid
+rownames(hungary5) <- 1:nrow(hungary5)
+hungary5$id <- 1:nrow(hungary5)
 
 # Process raw data --------------------------------------------------------
 
-iterpost <- function(sub){
+subreddit_processer <- function(sub){
+  #start timer
   start.time <- Sys.time()
   
+  #extract vector of post bodies
   text <- sub[['text']]
   
   for (i in 1:length(text)){
@@ -47,112 +70,149 @@ iterpost <- function(sub){
     
     sub[i, 'nchar'] <- nchar(post)
     
-    log_info('Translating the post...')
-    sub[i, 'text_en'] <- translate(post, from = "auto", to = "en") #Translating
-    
-    log_info('Preprocessing the post...')
+    log_info('Preprocessing post No. {i}')
+  
+    # use language detection and translate non-english posts
+    if (detect_language(post)['LanguageCode'] != 'en'){
+      log_info('Translating...')
+      sub[i, 'text_en'] <- translate(post, from = "auto", to = "en")
+    } else {
+      sub[i, 'text_en'] <- post
+    }
+  
     post <- sub[i, 'text_en'] %>%
       removeNumbers() %>%
       removePunctuation() %>%
       stripWhitespace() %>% 
       tolower() %>% 
-      removeWords(c(stopwords(kind = "en"), 'im', 'dont')) %>% 
-      str_squish()
+      removeWords(tm::stopwords(kind = "en")) %>% #remove stopwords
+      str_squish() #squish multiple subsequent spaces
     
     sub[i, 'text_processed'] <- post
     
     log_info('Detect sentiments...')
-    sub[i, 'sentiment'] <- detect_sentiment(as.character(post))['Sentiment'] #Detect sentiment
+    
+    sub[i, 'sentiment'] <- detect_sentiment(as.character(post))['Sentiment']
     
     log_info('Detect keyphrases...')
+    
     keyphrases <- detect_phrases(post)
-    sub[i, 'keyphrase'] <- keyphrases[order(keyphrases$Score, decreasing = TRUE),]['Text'][1,] #Detect keywords
+    
+    # keep the keyphrase with the highest score
+    sub[i, 'keyphrase'] <- keyphrases[order(keyphrases$Score, decreasing = TRUE),]['Text'][1,] 
     
     log_info('Post No. {i} processed!')
     
   }
-  return(sub)
-  
+
+  #stop timer
   end.time <- Sys.time()
   time.taken <- end.time - start.time
   print(time.taken)
+  
+  return(sub)
 }
 
-hungary_processed <- iterpost(hungary4)
+hungary_processed <- subreddit_processer(hungary5)
 
 # Post cleanup ------------------------------------------------------------
 
-# remove clutter
-hungary_view <- hungary_processed[, !names(hungary_processed) %in% c('title','subreddit','url')]
+# extract week of year
+hungary_processed$weekofyear <- strftime(hungary_processed$date_utc, format='%V')
 
-# clear rowid
-rownames(hungary_view) <- 1:nrow(hungary_view)
-hungary_view$id <- 1:nrow(hungary_view)
+# tokenize keyphrases
+word_corpus <- unnest_tokens(hungary_processed, input = keyphrase, output = word) %>% 
+  count(id, word, name = "frequency")
 
-word_corpus <- unnest_tokens(hungary_view, input = text_processed, output = word) %>% 
-  count(id, word, name = "frequency", sort=TRUE)
+# stemming
+word_corpus$word <- wordStem(word_corpus$word, language = 'en')
+
+# create word corpus and add up dedup
+word_corpus_dedup <- word_corpus %>% 
+  group_by(word) %>% 
+  mutate(frequency = sum(frequency)) %>%
+  arrange(desc(frequency)) %>% 
+  distinct(word, .keep_all = T)
 
 # VIZ ---------------------------------------------------------------------
 
 # distribution of character numbers
-f1 <- ggplot(data = hungary_view) +
-            geom_histogram(aes(nchar))
+dist_characters <- ggplot(data = hungary_processed, aes(nchar)) +
+                    geom_histogram(aes(y=..density..), colour="firebrick4", fill="firebrick1")+
+                    geom_vline(aes(xintercept=mean(nchar)),
+                               color="firebrick3", linetype="dashed", size=1, alpha = 0.5) +
+                    geom_text(aes(mean(nchar), 0.0015, label=paste0("Mean: ",round(mean(nchar), 2))), hjust = -0.5) +
+                    labs(title = 'Character Distribution of Posts',
+                         caption = 'r/hungary',
+                         x = 'Number of characters',
+                         y = 'Density') +
+                    theme_bw()
 
-# word cloud
+# word cloud of keywords
 set.seed(1234) # for reproducibility 
+
 wordcloud(words = word_corpus$word,
-          freq = word_corpus$frequency,
-          min.freq = 1,
-          max.words=15,
-          random.order=FALSE,
-          rot.per=0.35,
-          colors=brewer.pal(8, "Dark2"))
+            freq = word_corpus$frequency,
+            min.freq = 1,
+            max.words=30,
+            random.order=FALSE,
+            rot.per=0.35,
+            colors=brewer.pal(8, "Dark2"))
 
-#
-# Specifyig the URL 
-url1 <- 'https://www.origo.hu/itthon/20210916-kiakadtak-a-szulok-az-lmbtqpropaganda-maitt.html'
-url2 <- 'https://444.hu/2021/09/15/a-time-a-meseorszag-mindenkie-cimu-mesekonyvert-a-vilag-100-legbefolyasosabb-embere-koze-sorolta-redai-dorottyat'
-
-origo <- read_html(url1)
-negynegynegy <- read_html(url2)
-
-origo_text <- html_nodes(origo, 'h2 , p, .article-title') %>% html_text()
-negynegynegy_text <- html_nodes(negynegynegy, '.jq , .full-width p, .full-width .anchor') %>% html_text()
-
-get_sentiments <- function(x){
-  x = paste(x, collapse = '')
+# weekly activities
+weekly_activity <- ggplot(data = hungary_processed %>% group_by(weekofyear) %>%
+                         summarise(total=sum(comments)), aes(x=weekofyear, y=total, group = 1)) +
+                    geom_point(color = 'red', size = 4) +
+                    geom_line(color = 'red', lwd = 1) +
+                    geom_hline(aes(yintercept=mean(total)),
+                             color="red", linetype="dashed", size = 1, alpha = 0.5) +
+                    geom_text(aes(1, mean(total), label=paste0("Mean: ",mean(total))), vjust = -1) +
+                    labs(title = "Weekly Activity in Last Month's Top",
+                         caption = 'r/hungary',
+                         x = 'Week of Year',
+                         y = 'Comments') +
+                    scale_y_continuous(labels = scales::unit_format(unit = "K", scale = 1e-3)) +
+                    theme_bw()
   
-  # Breaking the input text into character vectors of length.segm characters each
-  char.segments <- function(x, segm.length){
-    byte.counter <- nchar(x)
-    f <- c(1, rep(0, segm.length - 1))
-    f <- cumsum(rep(f, length.out = byte.counter))
-    s <- split(unlist(strsplit(x,'')), f)
-    unname(sapply(s, paste, collapse = ''))
-  }
-  
-  five.thousand.byte.chunk <- char.segments(x, 4000)
-  
-  # Iterating through the chunks 
-  for (i in 1:length(five.thousand.byte.chunk)) { 
-    current_chunk = five.thousand.byte.chunk[i]
-    if (current_chunk > "") {  
-      # Some cats so that you can see the chunks and their byte sum
-      
-      current_chunk <- translate(current_chunk, from = "auto", to = "en")
-      df <- detect_sentiment(unlist(current_chunk))
-      df$text = current_chunk
-      
-      if (!exists('sentiments_df')){
-        sentiments_df = df
-      } else {
-        sentiments_df = rbind(sentiments_df, df)
-      }
-    }
-  }
-  return(sentiments_df)
-}
+# weekly sentiments
+weekly_sentiments <- ggplot(data = hungary_processed, aes(fill=sentiment, x=weekofyear)) + 
+                      geom_bar(position='fill') +
+                      labs(title = 'Weekly Post Sentiments in the Last Month',
+                           caption = 'r/hungary',
+                           x = 'Week of Year',
+                           y = 'Share') +
+                      scale_y_continuous(labels = scales::percent) +
+                      scale_fill_viridis_d(name = 'Sentiment') +
+                      theme_bw()
 
-o <- get_sentiments(origo_text)
-n <- get_sentiments(negynegynegy_text)
+# most active negative posts by keyphrases
+negative <- hungary_processed %>%
+              filter(sentiment == 'NEGATIVE') %>% 
+              arrange(desc(comments)) %>%
+              slice(1:5) %>%
+              ggplot(., aes(x=reorder(keyphrase, comments) , y=comments))+
+              geom_bar(stat='identity', color = 'firebrick4', fill = 'firebrick1',  width = 0.8) +
+              labs(title = 'Most Active Negative Posts',
+                   subtitle = 'by keyphrases',
+                   caption = 'r/hungary',
+                   x = '',
+                   y = 'Comments') +
+              theme_bw() +
+              coord_flip()
 
+# most active positive posts by keyphrases
+
+positive <- hungary_processed %>%
+              filter(sentiment == 'POSITIVE') %>% 
+              arrange(desc(comments)) %>%
+              slice(1:5) %>%
+              ggplot(., aes(x=reorder(keyphrase, comments) , y=comments))+
+              geom_bar(stat='identity', color = 'green4', fill = 'green1',width = 0.8) +
+              labs(title = 'Most Active Positive Posts',
+                   subtitle = 'by keyphrases',
+                   caption = 'r/hungary',
+                   x = '',
+                   y = 'Comments') +
+              theme_bw() +
+              coord_flip()
+  

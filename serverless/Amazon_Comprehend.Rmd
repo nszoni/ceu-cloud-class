@@ -32,7 +32,7 @@ library("aws.comprehend")
 
 ### !!! WARNING !!! You might need to detect sentiment in 5000 character chunks. You can get an error message if your text is bigger then 5000 characters.
 
-detect_language("This is a test sentence in English")
+detect_language("This is a test sentence in English")['LanguageCode'] == 'en'
 ```
 
 Multi-lingual language detection:

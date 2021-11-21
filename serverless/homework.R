@@ -190,14 +190,15 @@ negative <- hungary_processed %>%
               filter(sentiment == 'NEGATIVE') %>% 
               arrange(desc(comments)) %>%
               slice(1:5) %>%
-              ggplot(., aes(x=reorder(keyphrase, comments) , y=comments))+
-              geom_bar(stat='identity', color = 'firebrick4', fill = 'firebrick1',  width = 0.8) +
+              ggplot(., aes(x=reorder(keyphrase, comments) , y=comments, fill = weekofyear))+
+              geom_bar(stat='identity',  width = 0.8) +
               labs(title = 'Most Active Negative Posts',
                    subtitle = 'by keyphrases',
                    caption = 'r/hungary',
                    x = '',
                    y = 'Comments') +
               theme_bw() +
+              scale_fill_viridis_d(name = 'Week of Year') +
               coord_flip()
 
 # most active positive posts by keyphrases
@@ -206,13 +207,13 @@ positive <- hungary_processed %>%
               filter(sentiment == 'POSITIVE') %>% 
               arrange(desc(comments)) %>%
               slice(1:5) %>%
-              ggplot(., aes(x=reorder(keyphrase, comments) , y=comments))+
-              geom_bar(stat='identity', color = 'green4', fill = 'green1',width = 0.8) +
+              ggplot(., aes(x=reorder(keyphrase, comments) , y=comments, fill = weekofyear))+
+              geom_bar(stat='identity', width = 0.8) +
               labs(title = 'Most Active Positive Posts',
                    subtitle = 'by keyphrases',
                    caption = 'r/hungary',
                    x = '',
                    y = 'Comments') +
               theme_bw() +
+              scale_fill_viridis_d(name = 'Week of Year') +
               coord_flip()
-  
